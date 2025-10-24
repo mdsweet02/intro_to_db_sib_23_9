@@ -1,0 +1,1 @@
+ALTER DATABASE Stud_Ayat_Daniar_1 MODIFY NAME = Stud_Ayat_Daniar
