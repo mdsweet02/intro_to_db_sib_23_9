@@ -1,0 +1,2 @@
+ALTER TABLE Anketa_zayavitelya
+ADD ID INT IDENTITY(1,1) PRIMARY KEY;
