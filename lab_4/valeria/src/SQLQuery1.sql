@@ -1,0 +1,2 @@
+USE UchetObrascheniy;
+GO
