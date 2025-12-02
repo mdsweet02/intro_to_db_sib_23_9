@@ -1,0 +1,1 @@
+SELECT dbo.fn_GetApplicantAge(1) AS Возраст;
