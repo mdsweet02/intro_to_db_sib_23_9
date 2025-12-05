@@ -1,0 +1,1 @@
+EXEC GetMeltsByMarkAndFurnace 1, 2;

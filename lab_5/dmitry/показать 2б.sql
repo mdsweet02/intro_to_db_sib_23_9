@@ -1,0 +1,1 @@
+SELECT dbo.GetAvgMeltQuantity(1) AS AvgQuantity;
