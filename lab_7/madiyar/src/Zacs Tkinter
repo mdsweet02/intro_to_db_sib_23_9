@@ -1,0 +1,318 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import pyodbc
+
+# ================== НАСТРОЙКИ БАЗЫ ДАННЫХ ==================
+
+def get_connection():
+    """
+    Строка подключения под твой сервер с Windows-аутентификацией.
+    ОБЯЗАТЕЛЬНО поменяй имя БД и при необходимости сервер.
+    """
+    conn_str = (
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        "SERVER=MADIYAR-LAPTOP\SQLEXPRESS;"          # <-- твой сервер
+        "DATABASE=CON;"               # <-- ИМЯ ТВОЕЙ БАЗЫ !!!
+        "TrustServerCertificate=yes;"
+        "Trusted_Connection=yes;"
+    )
+    return pyodbc.connect(conn_str)
+
+
+# =============== КЛАСС РАБОТЫ С БАЗОЙ ======================
+
+class Database:
+    def __init__(self):
+        self.conn = get_connection()
+
+    def fetch_all(self, table_name):
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT * FROM {table_name}")
+        rows = cur.fetchall()
+        columns = [d[0] for d in cur.description]
+        return rows, columns
+
+    def insert(self, table_name, data_dict):
+        """
+        data_dict: {col: value}
+        ВСТАВЛЯЕМ ВСЕ СТОЛБЦЫ, включая первый (ключ).
+        """
+        items = list(data_dict.items())
+        if not items:
+            return
+
+        columns = ",".join(f"[{k}]" for k, _ in items)
+        placeholders = ",".join("?" for _ in items)
+        values = [v for _, v in items]
+
+        cur = self.conn.cursor()
+        cur.execute(
+            f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})",
+            values
+        )
+        self.conn.commit()
+
+    def update(self, table_name, data_dict, pk_column):
+        """
+        pk_column — имя PK (первый столбец).
+        """
+        pk_value = data_dict[pk_column]
+        items = [(k, v) for k, v in data_dict.items() if k != pk_column]
+
+        if not items:
+            return
+
+        set_clause = ", ".join(f"[{k}]=?" for k, _ in items)
+        values = [v for _, v in items]
+        values.append(pk_value)
+
+        cur = self.conn.cursor()
+        cur.execute(
+            f"UPDATE {table_name} SET {set_clause} WHERE [{pk_column}]=?",
+            values
+        )
+        self.conn.commit()
+
+    def delete(self, table_name, pk_column, pk_value):
+        cur = self.conn.cursor()
+        cur.execute(
+            f"DELETE FROM {table_name} WHERE [{pk_column}]=?",
+            (pk_value,)
+        )
+        self.conn.commit()
+
+
+# ================== UI ДЛЯ ОДНОЙ ТАБЛИЦЫ ===================
+
+class TableFrame(ttk.Frame):
+    def __init__(self, master, db: Database, table_name: str, title: str = None):
+        super().__init__(master, padding=10)
+        self.db = db
+        self.table_name = table_name      # типа "dbo.Citizens" или "dbo.[Witness Child]"
+        self.title = title or table_name
+
+        self.columns = []
+        self.entries = {}
+        self.pk_column = None
+
+        self.create_widgets()
+        self.load_data()
+
+    def create_widgets(self):
+        # Заголовок
+        lbl_title = ttk.Label(
+            self,
+            text=self.title,
+            font=("Segoe UI", 14, "bold")
+        )
+        lbl_title.grid(row=0, column=0, columnspan=4, pady=(0, 10), sticky="w")
+
+        # Таблица (Treeview)
+        self.tree = ttk.Treeview(self, show="headings", height=12)
+        self.tree.grid(row=1, column=0, columnspan=4,
+                       sticky="nsew", pady=(0, 10))
+
+        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        vsb.grid(row=1, column=4, sticky="ns", pady=(0, 10))
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.bind("<<TreeviewSelect>>", self.on_row_select)
+
+        # Панель ввода
+        self.inputs_frame = ttk.LabelFrame(self, text="Запись")
+        self.inputs_frame.grid(row=2, column=0, columnspan=4,
+                               sticky="ew", pady=(0, 10), ipadx=5, ipady=5)
+
+        # Кнопки
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=3, column=0, columnspan=4, sticky="ew")
+
+        self.btn_add = ttk.Button(
+            btn_frame, text="Добавить", command=self.add_record)
+        self.btn_update = ttk.Button(
+            btn_frame, text="Обновить", command=self.update_record)
+        self.btn_delete = ttk.Button(
+            btn_frame, text="Удалить", command=self.delete_record)
+        self.btn_clear = ttk.Button(
+            btn_frame, text="Очистить поля", command=self.clear_entries)
+        self.btn_refresh = ttk.Button(
+            btn_frame, text="Обновить список", command=self.load_data)
+
+        self.btn_add.grid(row=0, column=0, padx=5, pady=5)
+        self.btn_update.grid(row=0, column=1, padx=5, pady=5)
+        self.btn_delete.grid(row=0, column=2, padx=5, pady=5)
+        self.btn_clear.grid(row=0, column=3, padx=5, pady=5)
+        self.btn_refresh.grid(row=0, column=4, padx=5, pady=5)
+
+        # Разметка
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+    def build_inputs(self):
+        # Очищаем старые поля
+        for widget in self.inputs_frame.winfo_children():
+            widget.destroy()
+        self.entries.clear()
+
+        # предполагаем, что первый столбец — PK
+        if self.columns:
+            self.pk_column = self.columns[0]
+
+        for i, col in enumerate(self.columns):
+            lbl = ttk.Label(self.inputs_frame, text=col + ":")
+            lbl.grid(row=i // 2, column=(i % 2) * 2,
+                     sticky="e", padx=5, pady=3)
+
+            entry = ttk.Entry(self.inputs_frame, width=35)
+            entry.grid(row=i // 2, column=(i % 2) * 2 + 1,
+                       sticky="w", padx=5, pady=3)
+
+            self.entries[col] = entry
+
+    # ---------- Работа с данными ----------
+
+    def load_data(self):
+        try:
+            rows, columns = self.db.fetch_all(self.table_name)
+        except Exception as e:
+            messagebox.showerror("Ошибка БД", str(e))
+            return
+
+        self.columns = columns
+        self.tree.delete(*self.tree.get_children())
+        self.tree["columns"] = self.columns
+
+        for col in self.columns:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=140, anchor="w")
+
+        for row in rows:
+            self.tree.insert("", "end", values=list(row))
+
+        self.build_inputs()
+
+    def on_row_select(self, event):
+        selected = self.tree.selection()
+        if not selected:
+            return
+
+        values = self.tree.item(selected[0], "values")
+        for col, val in zip(self.columns, values):
+            entry = self.entries[col]
+            entry.delete(0, tk.END)
+            entry.insert(0, val)
+
+    def collect_data(self):
+        data = {}
+        for col, entry in self.entries.items():
+            value = entry.get()
+            if isinstance(value, str):
+                value = value.strip()
+            data[col] = value
+        return data
+
+    def add_record(self):
+        data = self.collect_data()
+        try:
+            self.db.insert(self.table_name, data_dict=data)
+        except Exception as e:
+            messagebox.showerror("Ошибка добавления", str(e))
+            return
+
+        self.load_data()
+        self.clear_entries()
+
+    def update_record(self):
+        data = self.collect_data()
+        if not self.pk_column or not data.get(self.pk_column):
+            messagebox.showwarning(
+                "Нет ключа", "Сначала выберите запись в таблице.")
+            return
+        try:
+            self.db.update(self.table_name, data_dict=data,
+                           pk_column=self.pk_column)
+        except Exception as e:
+            messagebox.showerror("Ошибка обновления", str(e))
+            return
+
+        self.load_data()
+
+    def delete_record(self):
+        if not self.pk_column:
+            return
+
+        data = self.collect_data()
+        pk_val = data.get(self.pk_column)
+        if not pk_val:
+            messagebox.showwarning(
+                "Нет ключа", "Сначала выберите запись, которую нужно удалить.")
+            return
+
+        if not messagebox.askyesno(
+            "Подтверждение",
+            f"Удалить запись с {self.pk_column}={pk_val}?"
+        ):
+            return
+
+        try:
+            self.db.delete(self.table_name, self.pk_column, pk_val)
+        except Exception as e:
+            messagebox.showerror("Ошибка удаления", str(e))
+            return
+
+        self.load_data()
+        self.clear_entries()
+
+    def clear_entries(self):
+        for entry in self.entries.values():
+            entry.delete(0, tk.END)
+
+
+# ================== ГЛАВНОЕ ОКНО ===========================
+
+class MainApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Registry Office – CRUD система")
+
+        self.geometry("1200x700")
+        self.minsize(1000, 600)
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TNotebook.Tab", font=("Segoe UI", 11))
+        style.configure("TButton", font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+
+        self.db = Database()
+        self.create_ui()
+
+    def create_ui(self):
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # <<< ОБЯЗАТЕЛЬНО ПРОВЕРЬ НАЗВАНИЯ ТАБЛИЦ >>> #
+        tables = [
+            ("dbo.Citizens", "Citizens"),
+            ("dbo.Certificate", "Certificate"),
+            ("dbo.[Type of certificate code]", "Type of certificate code"),
+            ("dbo.Nationalities", "Nationalities"),
+            ("dbo.Workers", "Workers"),
+            ("dbo.Payment", "Payment"),
+            ("dbo.[Witness Child]", "Witness Child"),
+            ("dbo.[Death certificate]", "Death certificate"),
+            ("dbo.[Attestation_Wafe/mother]", "Attestation Wife/mother"),
+            ("dbo.[Attestation_Husband/father]", "Attestation Husband/father"),
+        ]
+
+        for table_name, title in tables:
+            frame = TableFrame(notebook, self.db, table_name, title)
+            notebook.add(frame, text=title)
+
+
+if __name__ == "__main__":
+    try:
+        app = MainApp()
+        app.mainloop()
+    except pyodbc.Error as e:
+        messagebox.showerror("Ошибка подключения к БД", str(e))
